@@ -1,0 +1,21 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "identificador": "RT-IMP-TEST",
+        "material": "PEAD",
+        "diametro_pulgadas": 3,
+        "estado_fisico": "Bueno"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [-99.4654, 19.2510],
+          [-99.4664, 19.2520]
+        ]
+      }
+    }
+  ]
+}

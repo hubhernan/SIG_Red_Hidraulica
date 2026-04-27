@@ -2,6 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config({ override: true });
 
@@ -127,6 +132,412 @@ app.put('/api/valvulas/:id', async (req, res) => {
   } catch (error) {
     console.error('Error en PUT /api/valvulas:', error);
     res.status(500).json({ error: 'Error al actualizar el estado de la válvula' });
+  }
+});
+
+// 2.2 Endpoint: Simulación de Afectación por Cierre de Válvula
+app.get('/api/valvulas/:id/afectacion', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // 1. Obtener tuberías afectadas
+    const queryTuberias = `
+      WITH RECURSIVE reachable_pipes AS (
+          SELECT p.id, p.geom, p.identificador
+          FROM red_tuberias p
+          JOIN red_nodos_control n ON ST_DWithin(p.geom::geography, n.geom::geography, 2)
+          WHERE n.identificador = 'TQ-001'
+
+          UNION
+
+          SELECT p.id, p.geom, p.identificador
+          FROM red_tuberias p
+          JOIN reachable_pipes rp ON ST_Intersects(p.geom, rp.geom)
+          WHERE p.id <> rp.id
+            AND NOT EXISTS (
+                SELECT 1 FROM red_nodos_control v 
+                WHERE v.id = $1 AND ST_DWithin(rp.geom::geography, v.geom::geography, 5)
+            )
+      ),
+      affected_pipes AS (
+          SELECT id, geom, identificador 
+          FROM red_tuberias 
+          WHERE id NOT IN (SELECT id FROM reachable_pipes)
+      )
+      SELECT jsonb_build_object(
+          'type',     'FeatureCollection',
+          'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+      ) AS geojson
+      FROM (
+        SELECT jsonb_build_object(
+          'type',       'Feature',
+          'id',         id,
+          'geometry',   ST_AsGeoJSON(ST_Transform(geom, 4326))::jsonb,
+          'properties', jsonb_build_object(
+              'identificador', identificador,
+              'estado', 'Afectado'
+          )
+        ) AS feature
+        FROM affected_pipes
+      ) features;
+    `;
+    
+    const resultTuberias = await pool.query(queryTuberias, [id]);
+
+    // 2. Obtener tomas afectadas
+    const queryTomas = `
+      WITH RECURSIVE reachable_pipes AS (
+          SELECT p.id, p.geom, p.identificador
+          FROM red_tuberias p
+          JOIN red_nodos_control n ON ST_DWithin(p.geom::geography, n.geom::geography, 2)
+          WHERE n.identificador = 'TQ-001'
+
+          UNION
+
+          SELECT p.id, p.geom, p.identificador
+          FROM red_tuberias p
+          JOIN reachable_pipes rp ON ST_Intersects(p.geom, rp.geom)
+          WHERE p.id <> rp.id
+            AND NOT EXISTS (
+                SELECT 1 FROM red_nodos_control v 
+                WHERE v.id = $1 AND ST_DWithin(rp.geom::geography, v.geom::geography, 5)
+            )
+      ),
+      affected_pipes AS (
+          SELECT id, geom, identificador 
+          FROM red_tuberias 
+          WHERE id NOT IN (SELECT id FROM reachable_pipes)
+      )
+      SELECT jsonb_build_object(
+          'type',     'FeatureCollection',
+          'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+      ) AS geojson
+      FROM (
+        SELECT jsonb_build_object(
+          'type',       'Feature',
+          'id',         t.id,
+          'geometry',   ST_AsGeoJSON(ST_Transform(t.geom, 4326))::jsonb,
+          'properties', jsonb_build_object(
+              'identificador', t.identificador,
+              'titular', t.titular,
+              'estado', 'Afectado'
+          )
+        ) AS feature
+        FROM tomas_domiciliarias t
+        WHERE EXISTS (
+            SELECT 1 FROM affected_pipes ap 
+            WHERE ST_DWithin(t.geom::geography, ap.geom::geography, 20)
+        )
+      ) features;
+    `;
+
+    const resultTomas = await pool.query(queryTomas, [id]);
+
+    res.json({
+      tuberias_afectadas: resultTuberias.rows[0].geojson,
+      tomas_afectadas: resultTomas.rows[0].geojson
+    });
+  } catch (error) {
+    console.error('Error en /api/valvulas/:id/afectacion:', error);
+    res.status(500).json({ error: 'Error al simular la afectación' });
+  }
+});
+
+// 2.4 Endpoints: Panel PostGIS
+app.get('/api/postgis/consultas/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (id === '1') {
+      const query = `
+        SELECT jsonb_build_object(
+            'type',     'FeatureCollection',
+            'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+        ) AS geojson
+        FROM (
+          SELECT jsonb_build_object(
+            'type',       'Feature',
+            'id',         t.id,
+            'geometry',   ST_AsGeoJSON(ST_Transform(t.geom, 4326))::jsonb,
+            'properties', jsonb_build_object(
+                'identificador', t.identificador,
+                'titular', t.titular,
+                'detalle', 'Sin tubería cercana (> 30m)'
+            )
+          ) AS feature
+          FROM tomas_domiciliarias t
+          WHERE NOT EXISTS (
+              SELECT 1 FROM red_tuberias p 
+              WHERE ST_DWithin(t.geom::geography, p.geom::geography, 30)
+          )
+        ) features;
+      `;
+      const result = await pool.query(query);
+      return res.json({
+        titulo: 'Tomas Domiciliarias Aisladas',
+        descripcion: 'Tomas que se encuentran a más de 30 metros de cualquier tubería registrada (Posibles conexiones irregulares).',
+        geojson: result.rows[0].geojson
+      });
+    } 
+    
+    if (id === '2') {
+      const query = `
+        SELECT jsonb_build_object(
+            'type',     'FeatureCollection',
+            'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+        ) AS geojson
+        FROM (
+          SELECT jsonb_build_object(
+            'type',       'Feature',
+            'id',         s.id,
+            'geometry',   ST_AsGeoJSON(ST_Transform(ST_SetSRID(s.geom, 32614), 4326))::jsonb,
+            'properties', jsonb_build_object(
+                'nombre', s.nombre,
+                'detalle', CONCAT(COUNT(f.id), ' fugas reportadas')
+            )
+          ) AS feature
+          FROM admin_sectores s
+          LEFT JOIN reportes_fugas f ON ST_Contains(ST_Transform(ST_SetSRID(s.geom, 32614), 4326), f.geom)
+          GROUP BY s.id, s.geom, s.nombre
+        ) features;
+      `;
+      const result = await pool.query(query);
+      return res.json({
+        titulo: 'Fugas por Sector',
+        descripcion: 'Conteo espacial de reportes de fugas contenidos dentro de cada sector hidrométrico.',
+        geojson: result.rows[0].geojson
+      });
+    }
+
+    if (id === '3') {
+      const query = `
+        SELECT jsonb_build_object(
+            'type',     'FeatureCollection',
+            'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+        ) AS geojson
+        FROM (
+          SELECT jsonb_build_object(
+            'type',       'Feature',
+            'id',         id,
+            'geometry',   ST_AsGeoJSON(ST_Transform(geom, 4326))::jsonb,
+            'properties', jsonb_build_object(
+                'identificador', identificador,
+                'detalle', CONCAT('Diámetro: ', diametro_pulgadas, ' pulgadas')
+            )
+          ) AS feature
+          FROM red_tuberias
+          WHERE diametro_pulgadas > 2
+        ) features;
+      `;
+      const result = await pool.query(query);
+      return res.json({
+        titulo: 'Tuberías de Mayor Diámetro',
+        descripcion: 'Tuberías con diámetro superior a 2 pulgadas (Líneas principales).',
+        geojson: result.rows[0].geojson
+      });
+    }
+
+    res.status(400).json({ error: 'Consulta no válida' });
+  } catch (error) {
+    console.error('Error en /api/postgis/consultas:', error);
+    res.status(500).json({ error: 'Error al ejecutar consulta espacial' });
+  }
+});
+
+// 2.5 Endpoint: Importar Datos (GeoJSON)
+app.post('/api/importar', async (req, res) => {
+  const { layer, geojson } = req.body;
+  
+  if (!layer || !geojson || !geojson.features) {
+    return res.status(400).json({ error: 'Datos de importación inválidos' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let insertedCount = 0;
+
+    for (const feature of geojson.features) {
+      const geomStr = JSON.stringify(feature.geometry);
+      const props = feature.properties || {};
+
+      if (layer === 'tuberias') {
+        const materialStr = props.material || 'PVC';
+        const resMat = await client.query("SELECT id FROM cat_material_tuberia WHERE nombre ILIKE $1", [materialStr]);
+        let materialId = 1; 
+        if (resMat.rows.length > 0) {
+          materialId = resMat.rows[0].id;
+        }
+
+        const query = `
+          INSERT INTO red_tuberias (identificador, material_id, diametro_pulgadas, geom)
+          VALUES ($1, $2, $3, ST_SetSRID(ST_GeomFromGeoJSON($4), 4326))
+          RETURNING id;
+        `;
+        const values = [
+          props.identificador || `RT-IMP-${Math.floor(Math.random() * 10000)}`,
+          materialId,
+          parseFloat(props.diametro_pulgadas) || 2,
+          geomStr
+        ];
+        await client.query(query, values);
+        insertedCount++;
+      } 
+      
+      else if (layer === 'valvulas') {
+        const query = `
+          INSERT INTO red_nodos_control (identificador, tipo_id, estado_operativo, geom)
+          VALUES ($1, $2, $3, ST_SetSRID(ST_GeomFromGeoJSON($4), 4326))
+          RETURNING id;
+        `;
+        const values = [
+          props.identificador || `RN-IMP-${Math.floor(Math.random() * 10000)}`,
+          parseInt(props.tipo_id) || 1, 
+          props.estado_operativo || 'Abierta',
+          geomStr
+        ];
+        await client.query(query, values);
+        insertedCount++;
+      } 
+      
+      else if (layer === 'tomas') {
+        const query = `
+          INSERT INTO tomas_domiciliarias (identificador, titular, estado_fisico, geom)
+          VALUES ($1, $2, $3, ST_SetSRID(ST_GeomFromGeoJSON($4), 4326))
+          RETURNING id;
+        `;
+        const values = [
+          props.identificador || `TD-IMP-${Math.floor(Math.random() * 10000)}`,
+          props.titular || 'Importado via Web',
+          props.estado_fisico || 'Funcional',
+          geomStr
+        ];
+        await client.query(query, values);
+        insertedCount++;
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: `Importación exitosa. Se insertaron ${insertedCount} elementos.` });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en POST /api/importar:', error);
+    res.status(500).json({ error: 'Error al importar datos: ' + error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// 2.6 Endpoints: Creación de Infraestructura (Levantamiento en Campo)
+app.post('/api/tomas', async (req, res) => {
+  const { identificador, titular, direccion, estado_fisico, material_id, lat, lng } = req.body;
+  try {
+    const query = `
+      INSERT INTO tomas_domiciliarias (identificador, titular, direccion, estado_fisico, material_id, geom)
+      VALUES ($1, $2, $3, $4, $5, ST_SetSRID(ST_MakePoint($6, $7), 4326))
+      RETURNING id;
+    `;
+    const values = [
+      identificador || `TD-NEW-${Math.floor(Math.random() * 10000)}`,
+      titular || 'Nuevo Usuario',
+      direccion || '',
+      estado_fisico || 'Funcional',
+      material_id ? parseInt(material_id) : 1,
+      parseFloat(lng),
+      parseFloat(lat)
+    ];
+    const result = await pool.query(query, values);
+    res.json({ message: 'Toma registrada exitosamente.', id: result.rows[0].id });
+  } catch (error) {
+    console.error('Error en POST /api/tomas:', error);
+    res.status(500).json({ error: 'Error al registrar toma: ' + error.message });
+  }
+});
+
+app.post('/api/valvulas', async (req, res) => {
+  const { identificador, tipo_id, estado_operativo, lat, lng } = req.body;
+  try {
+    const query = `
+      INSERT INTO red_nodos_control (identificador, tipo_id, estado_operativo, geom)
+      VALUES ($1, $2, $3, ST_SetSRID(ST_MakePoint($4, $5), 4326))
+      RETURNING id;
+    `;
+    const values = [
+      identificador || `RN-NEW-${Math.floor(Math.random() * 10000)}`,
+      tipo_id ? parseInt(tipo_id) : 1,
+      estado_operativo || 'Abierta',
+      parseFloat(lng),
+      parseFloat(lat)
+    ];
+    const result = await pool.query(query, values);
+    res.json({ message: 'Válvula/Nodo registrado exitosamente.', id: result.rows[0].id });
+  } catch (error) {
+    console.error('Error en POST /api/valvulas:', error);
+    res.status(500).json({ error: 'Error al registrar válvula: ' + error.message });
+  }
+});
+
+app.post('/api/tuberias', async (req, res) => {
+  const { identificador, material_id, diametro_pulgadas, coordinates } = req.body;
+  try {
+    if (!coordinates || coordinates.length < 2) {
+      return res.status(400).json({ error: 'Se requieren al menos 2 vértices para una tubería.' });
+    }
+    const wktCoords = coordinates.map(coord => `${coord[1]} ${coord[0]}`).join(', ');
+    const wkt = `LINESTRING(${wktCoords})`;
+
+    const query = `
+      INSERT INTO red_tuberias (identificador, material_id, diametro_pulgadas, geom)
+      VALUES ($1, $2, $3, ST_GeomFromText($4, 4326))
+      RETURNING id;
+    `;
+    const values = [
+      identificador || `RT-NEW-${Math.floor(Math.random() * 10000)}`,
+      material_id ? parseInt(material_id) : 1,
+      parseFloat(diametro_pulgadas) || 2,
+      wkt
+    ];
+    const result = await pool.query(query, values);
+    res.json({ message: 'Tubería registrada exitosamente.', id: result.rows[0].id });
+  } catch (error) {
+    console.error('Error en POST /api/tuberias:', error);
+    res.status(500).json({ error: 'Error al registrar tubería: ' + error.message });
+  }
+});
+
+// 2.3 Endpoints: Gestión de Usuarios
+app.get('/api/usuarios', async (req, res) => {
+  try {
+    const query = `
+      SELECT u.id, u.nombre_completo, u.email, r.nombre as rol, u.activo 
+      FROM auth_usuarios u 
+      JOIN auth_roles r ON u.rol_id = r.id 
+      ORDER BY u.nombre_completo
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error en GET /api/usuarios:', error);
+    res.status(500).json({ error: 'Error al obtener usuarios' });
+  }
+});
+
+app.put('/api/usuarios/:id/rol', async (req, res) => {
+  const { id } = req.params;
+  const { rol } = req.body;
+  try {
+    const query = `
+      UPDATE auth_usuarios 
+      SET rol_id = (SELECT id FROM auth_roles WHERE nombre = $1) 
+      WHERE id = $2
+      RETURNING id
+    `;
+    const result = await pool.query(query, [rol, id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    res.json({ message: 'Rol actualizado exitosamente' });
+  } catch (error) {
+    console.error('Error en PUT /api/usuarios/:id/rol:', error);
+    res.status(500).json({ error: 'Error al actualizar el rol del usuario' });
   }
 });
 
@@ -340,8 +751,8 @@ app.get('/api/estadisticas', async (req, res) => {
       const state = row.estado_fisico?.toLowerCase();
       const count = parseInt(row.count, 10);
       tomas.total += count;
-      if (state === 'bueno' || state === 'activo' || state === 'operativa') tomas.activo += count;
-      else if (state === 'malo' || state === 'inactivo' || state === 'suspendida') tomas.inactivo += count;
+      if (state === 'bueno' || state === 'activo' || state === 'operativa' || state === 'funcional') tomas.activo += count;
+      else if (state === 'malo' || state === 'inactivo' || state === 'suspendida' || state === 'dañada') tomas.inactivo += count;
       else if (state === 'irregular' || state === 'clandestina') tomas.irregular += count;
     });
 
@@ -412,6 +823,16 @@ app.put('/api/reportes/:id', async (req, res) => {
     console.error('Error en PUT /api/reportes:', error);
     res.status(500).json({ error: 'Error al actualizar el reporte' });
   }
+});
+
+// Serve static files from the React app build directory
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// The "catchall" handler: for any request that doesn't
+// match one above, send back React's index.html file.
+app.get('*', (req, res) => {
+  const indexPath = path.join(__dirname, '../dist/index.html');
+  res.sendFile(indexPath);
 });
 
 app.listen(PORT, () => {

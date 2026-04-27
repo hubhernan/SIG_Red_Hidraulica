@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, LayersControl, LayerGroup, ZoomControl, GeoJSON, useMap, CircleMarker } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, LayersControl, LayerGroup, ZoomControl, GeoJSON, useMap, CircleMarker, useMapEvents, Polyline } from 'react-leaflet';
 import { AlertTriangle, Droplets, MapPin, Search, Shield, Settings, Activity, Calendar } from 'lucide-react';
-import { Icon } from 'leaflet';
+import L, { Icon } from 'leaflet';
 
 // Icons setup
 const valveIcon = new Icon({
@@ -19,19 +19,209 @@ const alertIcon = new Icon({
   iconSize: [30, 30]
 });
 
-function MapController({ setMap }: { setMap: (map: any) => void }) {
+function MapController({ 
+  setMap, 
+  drawingType, 
+  setDrawingType,
+  lineVertices, 
+  setLineVertices, 
+  setNewFeatureCoords, 
+  setNewFeatureModalOpen 
+}: { 
+  setMap: (map: any) => void,
+  drawingType: 'toma' | 'valvula' | 'tuberia' | null,
+  setDrawingType: (type: 'toma' | 'valvula' | 'tuberia' | null) => void,
+  lineVertices: [number, number][],
+  setLineVertices: React.Dispatch<React.SetStateAction<[number, number][]>>,
+  setNewFeatureCoords: (coords: any) => void,
+  setNewFeatureModalOpen: (open: boolean) => void
+}) {
   const map = useMap();
+  
   useEffect(() => {
     if (map) {
       setMap(map);
     }
   }, [map, setMap]);
+
+  useMapEvents({
+    click(e) {
+      if (!drawingType) return;
+
+      const { lat, lng } = e.latlng;
+
+      if (drawingType === 'toma' || drawingType === 'valvula') {
+        setNewFeatureCoords({ lat, lng });
+        setNewFeatureModalOpen(true);
+        setDrawingType(null);
+      } else if (drawingType === 'tuberia') {
+        setLineVertices((prev) => [...prev, [lat, lng]]);
+      }
+    },
+  });
+
   return null;
 }
 
 function App() {
   const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(true); // Demo purpose
+  const [currentRole, setCurrentRole] = useState('Administrador');
+  const [isAdmin, setIsAdmin] = useState(true);
+  const isOperador = currentRole === 'Administrador' || currentRole === 'Operador de Campo';
+  
+  const [usersModalOpen, setUsersModalOpen] = useState(false);
+  const [users, setUsers] = useState<any[]>([]);
+
+  const [postgisModalOpen, setPostgisModalOpen] = useState(false);
+  const [selectedQuery, setSelectedQuery] = useState('1');
+  const [postgisResults, setPostgisResults] = useState<any>(null);
+
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importLayer, setImportLayer] = useState('tuberias');
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importMessage, setImportMessage] = useState('');
+
+  const [qgisModalOpen, setQgisModalOpen] = useState(false);
+
+  const [drawingType, setDrawingType] = useState<'toma' | 'valvula' | 'tuberia' | null>(null);
+  const [lineVertices, setLineVertices] = useState<[number, number][]>([]);
+  const [newFeatureCoords, setNewFeatureCoords] = useState<any>(null);
+  const [newFeatureModalOpen, setNewFeatureModalOpen] = useState(false);
+  
+  const [newIdentificador, setNewIdentificador] = useState('');
+  const [newTitular, setNewTitular] = useState('');
+  const [newMaterialId, setNewMaterialId] = useState('1');
+  const [newDiametro, setNewDiametro] = useState('2');
+  const [newTipoId, setNewTipoId] = useState('1');
+  const [newEstado, setNewEstado] = useState('Funcional');
+
+  const handleCreateFeature = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    let endpoint = '';
+    let body: any = {
+      identificador: newIdentificador,
+    };
+
+    if (drawingType === 'toma' || (!drawingType && newFeatureCoords && !lineVertices.length)) {
+      endpoint = '/api/tomas';
+      body = {
+        ...body,
+        titular: newTitular,
+        estado_fisico: newEstado,
+        material_id: newMaterialId,
+        lat: newFeatureCoords?.lat,
+        lng: newFeatureCoords?.lng
+      };
+    } else if (drawingType === 'valvula') {
+      endpoint = '/api/valvulas';
+      body = {
+        ...body,
+        tipo_id: newTipoId,
+        estado_operativo: newEstado === 'Funcional' ? 'Abierta' : 'Cerrada',
+        lat: newFeatureCoords?.lat,
+        lng: newFeatureCoords?.lng
+      };
+    } else if (lineVertices.length > 0) {
+      endpoint = '/api/tuberias';
+      body = {
+        ...body,
+        material_id: newMaterialId,
+        diametro_pulgadas: newDiametro,
+        coordinates: lineVertices
+      };
+    }
+
+    fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    .then(res => res.json())
+    .then(data => {
+      alert(data.message);
+      setNewFeatureModalOpen(false);
+      setLineVertices([]);
+      setNewFeatureCoords(null);
+      setNewIdentificador('');
+      setNewTitular('');
+      fetchTomas();
+      fetchValvulas();
+      fetchTuberias();
+      fetchStats();
+    })
+    .catch(err => alert(`Error: ${err.message}`));
+  };
+
+  const handleImportSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const geojson = JSON.parse(event.target?.result as string);
+        fetch('/api/importar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ layer: importLayer, geojson })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            setImportMessage(`Error: ${data.error}`);
+          } else {
+            setImportMessage(data.message);
+            if (importLayer === 'tomas') fetchTomas();
+            if (importLayer === 'valvulas') fetchValvulas();
+            if (importLayer === 'tuberias') fetchTuberias();
+            fetchStats();
+          }
+        })
+        .catch(err => setImportMessage(`Error: ${err.message}`));
+      } catch (err) {
+        setImportMessage('Error: El archivo no es un GeoJSON válido.');
+      }
+    };
+    reader.readAsText(importFile);
+  };
+
+  const fetchUsers = () => {
+    fetch('/api/usuarios')
+      .then(res => res.json())
+      .then(data => setUsers(data))
+      .catch(err => console.error('Error fetching users:', err));
+  };
+
+  const updateUserRole = (userId: string, newRole: string) => {
+    fetch(`/api/usuarios/${userId}/rol`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rol: newRole })
+    })
+    .then(res => res.json())
+    .then(data => {
+      alert('Rol actualizado exitosamente.');
+      fetchUsers();
+    })
+    .catch(err => console.error('Error updating user role:', err));
+  };
+
+  const executePostgisQuery = (queryId: string) => {
+    fetch(`/api/postgis/consultas/${queryId}`)
+      .then(res => res.json())
+      .then(data => {
+        setPostgisResults(data);
+        if (data.geojson && data.geojson.features && data.geojson.features.length > 0) {
+          const firstFeature = data.geojson.features[0];
+          if (firstFeature.geometry && firstFeature.geometry.type === 'Point') {
+            const coords = firstFeature.geometry.coordinates;
+            map?.flyTo([coords[1], coords[0]], 17);
+          }
+        }
+      })
+      .catch(err => console.error('Error executing PostGIS query:', err));
+  };
   const [tomas, setTomas] = useState<any>(null);
   const [valvulas, setValvulas] = useState<any>(null);
   const [tuberias, setTuberias] = useState<any>(null);
@@ -52,9 +242,22 @@ function App() {
   const [showColonia, setShowColonia] = useState(true);
 
   const [stats, setStats] = useState<any>(null);
+  const [affectedData, setAffectedData] = useState<{ tuberias: any, tomas: any } | null>(null);
+
+  const runSimulation = (valveId: string) => {
+    fetch(`/api/valvulas/${valveId}/afectacion`)
+      .then(res => res.json())
+      .then(data => {
+        setAffectedData({
+          tuberias: data.tuberias_afectadas,
+          tomas: data.tomas_afectadas
+        });
+      })
+      .catch(err => console.error('Error running simulation:', err));
+  };
 
   const fetchStats = () => {
-    fetch('http://localhost:3001/api/estadisticas')
+    fetch('/api/estadisticas')
       .then(res => res.json())
       .then(data => setStats(data))
       .catch(err => console.error('Error fetching stats:', err));
@@ -78,14 +281,14 @@ function App() {
   const [filterMantenimiento, setFilterMantenimiento] = useState('all');
 
   const fetchReports = () => {
-    fetch('http://localhost:3001/api/reportes')
+    fetch('/api/reportes')
       .then(res => res.json())
       .then(data => setAllReports(data))
       .catch(err => console.error('Error fetching reports:', err));
   };
 
   const updateReportStatus = (id: string, newStatus: string) => {
-    fetch(`http://localhost:3001/api/reportes/${id}`, {
+    fetch(`/api/reportes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ estado: newStatus }),
@@ -98,43 +301,65 @@ function App() {
     .catch(err => console.error('Error updating report status:', err));
   };
 
-  useEffect(() => {
-    fetchStats();
-    fetchReports();
-    fetch('http://localhost:3001/api/tomas')
+  const fetchTomas = () => {
+    fetch('/api/tomas')
       .then(res => res.json())
       .then(data => setTomas(data))
       .catch(err => console.error('Error fetching tomas:', err));
+  };
 
-    fetch('http://localhost:3001/api/valvulas')
+  const fetchValvulas = () => {
+    fetch('/api/valvulas')
       .then(res => res.json())
       .then(data => setValvulas(data))
       .catch(err => console.error('Error fetching valvulas:', err));
+  };
 
-    fetch('http://localhost:3001/api/tuberias')
+  const fetchTuberias = () => {
+    fetch('/api/tuberias')
       .then(res => res.json())
       .then(data => setTuberias(data))
       .catch(err => console.error('Error fetching tuberias:', err));
+  };
 
-    fetch('http://localhost:3001/api/sectores')
+  const fetchSectores = () => {
+    fetch('/api/sectores')
       .then(res => res.json())
       .then(data => setSectores(data))
       .catch(err => console.error('Error fetching sectores:', err));
+  };
 
-    fetch('http://localhost:3001/api/manzanas')
+  const fetchManzanas = () => {
+    fetch('/api/manzanas')
       .then(res => res.json())
       .then(data => setManzanas(data))
       .catch(err => console.error('Error fetching manzanas:', err));
+  };
 
-    fetch('http://localhost:3001/api/municipio')
+  const fetchMunicipio = () => {
+    fetch('/api/municipio')
       .then(res => res.json())
       .then(data => setMunicipio(data))
       .catch(err => console.error('Error fetching municipio:', err));
+  };
 
-    fetch('http://localhost:3001/api/colonia')
+  const fetchColonia = () => {
+    fetch('/api/colonia')
       .then(res => res.json())
       .then(data => setColonia(data))
       .catch(err => console.error('Error fetching colonia:', err));
+  };
+
+  useEffect(() => {
+    fetchStats();
+    fetchReports();
+    fetchTomas();
+    fetchValvulas();
+    fetchTuberias();
+    fetchSectores();
+    fetchManzanas();
+    fetchMunicipio();
+    fetchColonia();
   }, []);
 
   // Pedregalito, Ocoyoacac (Colonia Guadalupe Hidalgo center)
@@ -146,7 +371,7 @@ function App() {
 
   const handleReportSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    fetch('http://localhost:3001/api/reportes', {
+    fetch('/api/reportes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -171,7 +396,7 @@ function App() {
 
   const toggleValveStatus = (id: string, currentStatus: string) => {
     const newStatus = currentStatus === 'Abierta' ? 'Cerrada' : 'Abierta';
-    fetch(`http://localhost:3001/api/valvulas/${id}`, {
+    fetch(`/api/valvulas/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ estado_operativo: newStatus }),
@@ -179,7 +404,7 @@ function App() {
     .then(res => res.json())
     .then(data => {
       // Recargar datos de válvulas
-      fetch('http://localhost:3001/api/valvulas')
+      fetch('/api/valvulas')
         .then(res => res.json())
         .then(data => {
           setValvulas(data);
@@ -213,11 +438,21 @@ function App() {
               <AlertTriangle size={18} />
               <span>Reportar Fuga</span>
             </button>
-            <div className="user-profile">
-              <div className="avatar">
-                {isAdmin ? <Shield size={16} /> : <MapPin size={16} />}
-              </div>
-              <span>{isAdmin ? 'Admin' : 'Usuario'}</span>
+            <div className="user-profile" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <label style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Actuar como:</label>
+              <select 
+                value={currentRole} 
+                onChange={(e) => {
+                  setCurrentRole(e.target.value);
+                  setIsAdmin(e.target.value === 'Administrador');
+                }}
+                className="form-control"
+                style={{ width: 'auto', display: 'inline-block', padding: '0.25rem', background: '#0f172a', color: '#f8fafc', border: '1px solid #334155', borderRadius: '4px' }}
+              >
+                <option value="Administrador">Admin</option>
+                <option value="Operador de Campo">Operador</option>
+                <option value="Ciudadano">Ciudadano</option>
+              </select>
             </div>
           </div>
         </div>
@@ -296,16 +531,39 @@ function App() {
             </div>
           </div>
 
-          {isAdmin && (
+          {isOperador && (
             <div className="sidebar-section admin-section">
               <h2 className="sidebar-title admin-title">
                 <Settings size={16} /> Administración
               </h2>
-              <button className="btn btn-outline full-width">Gestión de Usuarios</button>
+              {isAdmin && (
+                <button 
+                  className="btn btn-outline full-width"
+                  onClick={() => { fetchUsers(); setUsersModalOpen(true); }}
+                >
+                  Gestión de Usuarios
+                </button>
+              )}
+              {isAdmin && (
+                <button 
+                  className="btn btn-outline full-width mt-2"
+                  onClick={() => { setImportMessage(''); setImportModalOpen(true); }}
+                >
+                  Importar Datos (GeoJSON)
+                </button>
+              )}
+              {isAdmin && (
+                <button 
+                  className="btn btn-outline full-width mt-2"
+                  onClick={() => setQgisModalOpen(true)}
+                >
+                  Integración QGIS
+                </button>
+              )}
               <button className="btn btn-outline full-width mt-2" onClick={() => { fetchReports(); setReportsModalOpen(true); }}>
                 Validar Reportes
               </button>
-              <button className="btn btn-outline full-width mt-2">
+              <button className="btn btn-outline full-width mt-2" onClick={() => setPostgisModalOpen(true)}>
                 <Activity size={16} /> Panel PostGIS
               </button>
             </div>
@@ -324,13 +582,113 @@ function App() {
           >
             <Droplets size={16} style={{ marginRight: '0.25rem' }} /> Centrar Colonia
           </button>
+
+          {affectedData && (
+            <button 
+              className="btn btn-secondary" 
+              style={{ position: 'absolute', top: '4.5rem', left: '1.5rem', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', display: 'flex', alignItems: 'center', borderColor: '#dc2626', color: '#dc2626', background: 'white' }}
+              onClick={() => setAffectedData(null)}
+            >
+              Limpiar Simulación
+            </button>
+          )}
+
+          {/* Barra de Levantamiento en Campo (Solo Operadores/Admin) */}
+          {isOperador && (
+            <div 
+              style={{ 
+                position: 'absolute', 
+                top: affectedData ? '7.5rem' : '4.5rem', 
+                left: '1.5rem', 
+                zIndex: 1000, 
+                background: 'rgba(15, 23, 42, 0.85)', 
+                backdropFilter: 'blur(10px)',
+                padding: '0.75rem', 
+                borderRadius: '12px',
+                border: '1px solid rgba(255,255,255,0.1)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+                display: 'flex', 
+                flexDirection: 'column',
+                gap: '0.5rem',
+                maxWidth: '220px'
+              }}
+            >
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#94a3b8', textAlign: 'center', marginBottom: '0.25rem' }}>
+                LEVANTAMIENTO EN CAMPO
+              </div>
+              
+              <button 
+                className={`btn ${drawingType === 'toma' ? 'btn-primary' : 'btn-outline'}`}
+                style={{ fontSize: '0.85rem', padding: '0.5rem' }}
+                onClick={() => { setDrawingType('toma'); setLineVertices([]); }}
+              >
+                ➕ Nueva Toma
+              </button>
+              <button 
+                className={`btn ${drawingType === 'valvula' ? 'btn-primary' : 'btn-outline'}`}
+                style={{ fontSize: '0.85rem', padding: '0.5rem' }}
+                onClick={() => { setDrawingType('valvula'); setLineVertices([]); }}
+              >
+                ➕ Nueva Válvula
+              </button>
+              <button 
+                className={`btn ${drawingType === 'tuberia' ? 'btn-primary' : 'btn-outline'}`}
+                style={{ fontSize: '0.85rem', padding: '0.5rem' }}
+                onClick={() => { setDrawingType('tuberia'); setLineVertices([]); }}
+              >
+                ➕ Nueva Tubería
+              </button>
+
+              {drawingType && (
+                <div style={{ fontSize: '0.75rem', color: '#38bdf8', textAlign: 'center', marginTop: '0.25rem' }}>
+                  {drawingType === 'tuberia' 
+                    ? 'Haz clic en el mapa para añadir vértices.' 
+                    : 'Haz clic en el mapa para ubicar el elemento.'}
+                </div>
+              )}
+
+              {drawingType === 'tuberia' && lineVertices.length > 0 && (
+                <button 
+                  className="btn btn-primary"
+                  style={{ fontSize: '0.85rem', padding: '0.5rem', background: '#10b981', borderColor: '#10b981' }}
+                  onClick={() => { setNewFeatureModalOpen(true); }}
+                >
+                  💾 Guardar ({lineVertices.length} pts)
+                </button>
+              )}
+
+              {drawingType && (
+                <button 
+                  className="btn btn-outline"
+                  style={{ fontSize: '0.85rem', padding: '0.25rem', borderColor: '#ef4444', color: '#ef4444' }}
+                  onClick={() => { setDrawingType(null); setLineVertices([]); }}
+                >
+                  Cancelar
+                </button>
+              )}
+            </div>
+          )}
           <MapContainer 
             center={mapCenter as [number, number]} 
             zoom={16} 
             className="leaflet-map"
             zoomControl={false}
           >
-            <MapController setMap={setMap} />
+            <MapController 
+              setMap={setMap} 
+              drawingType={drawingType}
+              setDrawingType={setDrawingType}
+              lineVertices={lineVertices}
+              setLineVertices={setLineVertices}
+              setNewFeatureCoords={setNewFeatureCoords}
+              setNewFeatureModalOpen={setNewFeatureModalOpen}
+            />
+            {drawingType === 'tuberia' && lineVertices.length > 0 && (
+              <Polyline 
+                positions={lineVertices} 
+                pathOptions={{ color: '#38bdf8', weight: 4, dashArray: '5, 10' }} 
+              />
+            )}
             <ZoomControl position="bottomright" />
             <LayersControl position="topright">
               <LayersControl.BaseLayer checked name="Mapa Base (Satélite)">
@@ -435,12 +793,21 @@ function App() {
                                <p><strong>Mantenimiento:</strong> {feature.properties.fecha_ultimo_mantenimiento || 'Sin datos'}</p>
                                
                                {isAdmin && (
-                                 <button 
-                                   className="btn btn-sm btn-outline mt-2"
-                                   onClick={() => toggleValveStatus(feature.id, feature.properties.estado_operativo)}
-                                 >
-                                   Cambiar a {feature.properties.estado_operativo === 'Abierta' ? 'Cerrada' : 'Abierta'}
-                                 </button>
+                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                   <button 
+                                     className="btn btn-sm btn-outline mt-2"
+                                     onClick={() => toggleValveStatus(feature.id, feature.properties.estado_operativo)}
+                                   >
+                                     Cambiar a {feature.properties.estado_operativo === 'Abierta' ? 'Cerrada' : 'Abierta'}
+                                   </button>
+                                   <button 
+                                     className="btn btn-sm btn-primary"
+                                     style={{ background: '#dc2626', borderColor: '#dc2626' }}
+                                     onClick={() => runSimulation(feature.id)}
+                                   >
+                                     Simular Corte
+                                   </button>
+                                 </div>
                                )}
                              </div>
                         </Popup>
@@ -466,9 +833,9 @@ function App() {
                         key={JSON.stringify(filtered)} 
                         data={filtered} 
                         style={(feature: any) => ({
-                          color: feature.properties.diametro_pulgadas > 2 ? '#2563eb' : '#3b82f6',
-                          weight: feature.properties.diametro_pulgadas || 2,
-                          opacity: 0.8
+                          color: feature.properties.diametro_pulgadas > 2 ? '#1d4ed8' : '#2563eb',
+                          weight: (feature.properties.diametro_pulgadas * 3.5) || 6,
+                          opacity: 0.9
                         })}
                       />
                     );
@@ -539,6 +906,68 @@ function App() {
                 </LayerGroup>
               )}
             </LayersControl>
+
+            {postgisResults && postgisResults.geojson && (
+              <GeoJSON 
+                key={`postgis-results-${JSON.stringify(postgisResults.geojson)}`}
+                data={postgisResults.geojson} 
+                style={(feature: any) => {
+                  if (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon') {
+                    return { color: '#8b5cf6', weight: 3, fillOpacity: 0.3, fillColor: '#8b5cf6' };
+                  }
+                  return { color: '#8b5cf6', weight: 8, opacity: 0.9, dashArray: '5, 5' };
+                }}
+                pointToLayer={(feature: any, latlng: any) => {
+                  return L.circleMarker(latlng, {
+                    radius: 10,
+                    fillColor: '#8b5cf6',
+                    color: '#fff',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                  });
+                }}
+                onEachFeature={(feature: any, layer: any) => {
+                  layer.bindPopup(`
+                    <div class="popup-content">
+                      <h3 style="color: #8b5cf6;">${feature.properties.identificador || feature.properties.nombre || 'Resultado'}</h3>
+                      <p><strong>Detalle:</strong> ${feature.properties.detalle}</p>
+                    </div>
+                  `);
+                }}
+              />
+            )}
+            {affectedData && (
+              <>
+                {affectedData.tuberias && (
+                  <GeoJSON 
+                    key={`affected-pipes-${JSON.stringify(affectedData.tuberias)}`}
+                    data={affectedData.tuberias} 
+                    style={{ color: '#dc2626', weight: 8, opacity: 0.8, dashArray: '10, 15' }}
+                  />
+                )}
+                {affectedData.tomas && affectedData.tomas.features && affectedData.tomas.features.map((feature: any) => {
+                  const coords = feature.geometry.coordinates;
+                  if (!coords || coords.length < 2) return null;
+                  return (
+                    <CircleMarker 
+                      key={`affected-toma-${feature.id}`}
+                      center={[coords[1], coords[0]]}
+                      radius={10}
+                      pathOptions={{ color: '#dc2626', fillColor: '#dc2626', fillOpacity: 0.6, weight: 3 }}
+                    >
+                      <Popup>
+                        <div className="popup-content">
+                          <h3 style={{ color: '#dc2626' }}>Toma Afectada</h3>
+                          <p><strong>ID:</strong> {feature.properties.identificador}</p>
+                          <p><strong>Titular:</strong> {feature.properties.titular || 'No registrado'}</p>
+                        </div>
+                      </Popup>
+                    </CircleMarker>
+                  );
+                })}
+              </>
+            )}
           </MapContainer>
         </div>
 
@@ -688,6 +1117,393 @@ function App() {
 
             <div className="modal-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
               <button type="button" className="btn btn-primary" onClick={() => setReportsModalOpen(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Users Management Modal */}
+      {usersModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel" style={{ maxWidth: '600px', width: '100%' }}>
+            <h2>Gestión de Usuarios</h2>
+            <p className="modal-subtitle">Administra los roles y accesos del personal.</p>
+            
+            <div className="reports-list" style={{ maxHeight: '400px', overflowY: 'auto', marginTop: '1rem' }}>
+              {users.length === 0 ? (
+                <p style={{ textAlign: 'center', color: '#94a3b8', margin: '2rem 0' }}>No hay usuarios registrados.</p>
+              ) : (
+                users.map((user: any) => (
+                  <div key={user.id} className="report-item" style={{ background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '8px', marginBottom: '1rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div className="report-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span className="report-type" style={{ fontWeight: 600, color: '#f8fafc' }}>{user.nombre_completo}</span>
+                      <span className={`status-badge status-${user.rol.toLowerCase().replace(/ /g, '-')}`} style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem', borderRadius: '4px' }}>
+                        {user.rol}
+                      </span>
+                    </div>
+                    <p className="report-desc" style={{ color: '#94a3b8', fontSize: '0.9rem', margin: '0.5rem 0' }}>{user.email}</p>
+                    <div className="report-actions" style={{ marginTop: '0.75rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                      <div style={{ display: 'flex', alignItems: 'center' }}>
+                        <label style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Cambiar Rol: </label>
+                        <select 
+                          value={user.rol} 
+                          onChange={(e) => updateUserRole(user.id, e.target.value)}
+                          className="form-control"
+                          style={{ width: 'auto', display: 'inline-block', marginLeft: '0.5rem', padding: '0.25rem', background: '#0f172a', color: '#f8fafc', border: '1px solid #334155', borderRadius: '4px' }}
+                        >
+                          <option value="Administrador">Administrador</option>
+                          <option value="Operador de Campo">Operador de Campo</option>
+                          <option value="Ciudadano">Ciudadano</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={() => setUsersModalOpen(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Import Modal */}
+      {importModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel" style={{ maxWidth: '500px', width: '100%' }}>
+            <h2>Importar Datos Históricos</h2>
+            <p className="modal-subtitle">Carga archivos GeoJSON para alimentar la base de datos.</p>
+            
+            <form onSubmit={handleImportSubmit} style={{ marginTop: '1.5rem' }}>
+              <div className="form-group">
+                <label>Capa de Destino:</label>
+                <select 
+                  value={importLayer} 
+                  onChange={(e) => setImportLayer(e.target.value)}
+                  className="form-control"
+                  style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                >
+                  <option value="tuberias">Red de Tuberías</option>
+                  <option value="valvulas">Válvulas y Nodos</option>
+                  <option value="tomas">Tomas Domiciliarias</option>
+                </select>
+              </div>
+
+              <div className="form-group" style={{ marginTop: '1rem' }}>
+                <label>Archivo GeoJSON:</label>
+                <input 
+                  type="file" 
+                  accept=".geojson,.json" 
+                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                  className="form-control"
+                  style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155', padding: '0.5rem' }}
+                  required
+                />
+              </div>
+
+              <button 
+                type="submit" 
+                className="btn btn-primary" 
+                style={{ marginTop: '1.5rem', width: '100%' }}
+                disabled={!importFile}
+              >
+                Procesar e Importar
+              </button>
+            </form>
+
+            {importMessage && (
+              <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '4px', background: importMessage.startsWith('Error') ? 'rgba(220, 38, 38, 0.2)' : 'rgba(22, 163, 74, 0.2)', border: importMessage.startsWith('Error') ? '1px solid #dc2626' : '1px solid #16a34a', color: '#f8fafc', fontSize: '0.9rem', textAlign: 'center' }}>
+                {importMessage}
+              </div>
+            )}
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-outline" onClick={() => setImportModalOpen(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal para Crear Nueva Infraestructura (Levantamiento) */}
+      {newFeatureModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel" style={{ maxWidth: '500px', width: '100%' }}>
+            <h2>Registrar Nueva Infraestructura</h2>
+            <p className="modal-subtitle">Ingresa los detalles del elemento capturado en campo.</p>
+            
+            <form onSubmit={handleCreateFeature} style={{ marginTop: '1.5rem' }}>
+              <div className="form-group">
+                <label>Identificador:</label>
+                <input 
+                  type="text" 
+                  value={newIdentificador} 
+                  onChange={(e) => setNewIdentificador(e.target.value)}
+                  className="form-control"
+                  placeholder="Ej. TD-0099 o RT-0099"
+                  style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                  required
+                />
+              </div>
+
+              {/* Si es Toma */}
+              {(drawingType === 'toma' || (!drawingType && newFeatureCoords && !lineVertices.length)) && (
+                <>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Titular:</label>
+                    <input 
+                      type="text" 
+                      value={newTitular} 
+                      onChange={(e) => setNewTitular(e.target.value)}
+                      className="form-control"
+                      placeholder="Nombre completo"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                      required
+                    />
+                  </div>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Material:</label>
+                    <select 
+                      value={newMaterialId} 
+                      onChange={(e) => setNewMaterialId(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                    >
+                      <option value="1">PVC</option>
+                      <option value="2">Manguera Negra</option>
+                      <option value="3">Cobre</option>
+                      <option value="5">HDP</option>
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Estado Físico:</label>
+                    <select 
+                      value={newEstado} 
+                      onChange={(e) => setNewEstado(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                    >
+                      <option value="Funcional">Funcional</option>
+                      <option value="Dañada">Dañada</option>
+                      <option value="Suspendida">Suspendida</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {/* Si es Válvula */}
+              {drawingType === 'valvula' && (
+                <>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Tipo de Válvula/Nodo:</label>
+                    <select 
+                      value={newTipoId} 
+                      onChange={(e) => setNewTipoId(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                    >
+                      <option value="1">Válvula de Paso</option>
+                      <option value="2">Reductor de Presión</option>
+                      <option value="3">Hidrante</option>
+                      <option value="4">Tanque</option>
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Estado Operativo:</label>
+                    <select 
+                      value={newEstado} 
+                      onChange={(e) => setNewEstado(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                    >
+                      <option value="Funcional">Abierta</option>
+                      <option value="Suspendida">Cerrada</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {/* Si es Tubería */}
+              {lineVertices.length > 0 && (
+                <>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Material:</label>
+                    <select 
+                      value={newMaterialId} 
+                      onChange={(e) => setNewMaterialId(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                    >
+                      <option value="1">PVC</option>
+                      <option value="2">Manguera Negra</option>
+                      <option value="3">Cobre</option>
+                      <option value="5">HDP</option>
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label>Diámetro (Pulgadas):</label>
+                    <input 
+                      type="number" 
+                      step="0.5"
+                      value={newDiametro} 
+                      onChange={(e) => setNewDiametro(e.target.value)}
+                      className="form-control"
+                      style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+                      required
+                    />
+                  </div>
+                </>
+              )}
+
+              <button type="submit" className="btn btn-primary" style={{ marginTop: '1.5rem', width: '100%' }}>
+                Guardar en Base de Datos
+              </button>
+            </form>
+
+            <div className="modal-actions" style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn btn-outline" 
+                onClick={() => { setNewFeatureModalOpen(false); if(drawingType !== 'tuberia') setDrawingType(null); }}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QGIS Integration Modal */}
+      {/* QGIS Integration Modal */}
+      {qgisModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel" style={{ maxWidth: '600px', width: '100%', background: '#ffffff', color: '#0f172a' }}>
+            <h2 style={{ color: '#0f172a' }}>Integración con QGIS (Escritorio)</h2>
+            <p className="modal-subtitle" style={{ color: '#475569' }}>Conecta QGIS directamente a la base de datos centralizada.</p>
+            
+            <div style={{ marginTop: '1.5rem', background: '#f1f5f9', padding: '1rem', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+              <h3 style={{ color: '#0284c7', fontSize: '1.1rem', marginBottom: '0.75rem' }}>Parámetros de Conexión PostGIS</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.95rem' }}>
+                <tbody>
+                  <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+                    <td style={{ padding: '0.5rem 0', color: '#475569', width: '120px' }}>Host:</td>
+                    <td style={{ padding: '0.5rem 0', color: '#0f172a', fontWeight: 600 }}>localhost</td>
+                  </tr>
+                  <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+                    <td style={{ padding: '0.5rem 0', color: '#475569' }}>Puerto:</td>
+                    <td style={{ padding: '0.5rem 0', color: '#0f172a', fontWeight: 600 }}>5432</td>
+                  </tr>
+                  <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+                    <td style={{ padding: '0.5rem 0', color: '#475569' }}>Base de Datos:</td>
+                    <td style={{ padding: '0.5rem 0', color: '#0f172a', fontWeight: 600 }}>sig_pedregal</td>
+                  </tr>
+                  <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+                    <td style={{ padding: '0.5rem 0', color: '#475569' }}>Usuario:</td>
+                    <td style={{ padding: '0.5rem 0', color: '#0f172a', fontWeight: 600 }}>ricardo</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ marginTop: '1.5rem' }}>
+              <h3 style={{ color: '#0284c7', fontSize: '1.1rem', marginBottom: '0.75rem' }}>Pasos para Conectar:</h3>
+              <ol style={{ paddingLeft: '1.25rem', color: '#1e293b', fontSize: '0.95rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', lineHeight: '1.4' }}>
+                <li>Abre <strong>QGIS Desktop</strong>.</li>
+                <li>En el menú superior, ve a <strong>Capa</strong> &gt; <strong>Añadir Capa</strong> &gt; <strong>Añadir Capas PostGIS...</strong></li>
+                <li>Haz clic en <strong>Nuevo</strong> e ingresa los parámetros de arriba.</li>
+                <li>Prueba la conexión y añade las capas: <code>red_tuberias</code>, <code>red_nodos_control</code> y <code>tomas_domiciliarias</code>.</li>
+              </ol>
+            </div>
+
+            <div style={{ marginTop: '1.5rem', padding: '0.75rem', background: 'rgba(2, 132, 199, 0.1)', borderRadius: '6px', border: '1px solid rgba(2, 132, 199, 0.3)', color: '#0369a1', fontSize: '0.85rem' }}>
+              ℹ️ <strong>Sincronización en Tiempo Real:</strong> Cualquier cambio realizado en QGIS se reflejará instantáneamente en este visor web y viceversa.
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={() => setQgisModalOpen(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Panel PostGIS Modal */}
+      {postgisModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel" style={{ maxWidth: '800px', width: '100%' }}>
+            <h2>Panel de Consultas PostGIS</h2>
+            <p className="modal-subtitle">Ejecuta consultas espaciales avanzadas directamente en la base de datos.</p>
+            
+            <div className="form-group" style={{ marginTop: '1.5rem' }}>
+              <label>Selecciona una Consulta Espacial:</label>
+              <select 
+                value={selectedQuery} 
+                onChange={(e) => setSelectedQuery(e.target.value)}
+                className="form-control"
+                style={{ background: '#0f172a', color: '#f8fafc', border: '1px solid #334155' }}
+              >
+                <option value="1">Tomas Domiciliarias Aisladas (Sin tubería cercana)</option>
+                <option value="2">Conteo de Fugas por Sector Hidrométrico</option>
+                <option value="3">Tuberías Principales (&gt; 2 pulgadas)</option>
+              </select>
+            </div>
+
+            <button 
+              type="button" 
+              className="btn btn-primary" 
+              style={{ marginTop: '1rem', width: '100%' }}
+              onClick={() => executePostgisQuery(selectedQuery)}
+            >
+              Ejecutar Consulta
+            </button>
+
+            {postgisResults && (
+              <div style={{ marginTop: '1.5rem' }}>
+                <h3 style={{ color: '#8b5cf6' }}>{postgisResults.titulo}</h3>
+                <p style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: '1rem' }}>{postgisResults.descripcion}</p>
+                
+                <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                    <thead>
+                      <tr style={{ background: 'rgba(255,255,255,0.05)', textAlign: 'left' }}>
+                        <th style={{ padding: '0.75rem' }}>ID / Nombre</th>
+                        <th style={{ padding: '0.75rem' }}>Detalle</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {postgisResults.geojson.features.length === 0 ? (
+                        <tr>
+                          <td colSpan={2} style={{ padding: '1rem', textAlign: 'center', color: '#64748b' }}>No se encontraron resultados.</td>
+                        </tr>
+                      ) : (
+                        postgisResults.geojson.features.map((f: any) => (
+                          <tr key={f.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
+                            <td style={{ padding: '0.75rem', color: '#f8fafc' }}>{f.properties.identificador || f.properties.nombre}</td>
+                            <td style={{ padding: '0.75rem', color: '#94a3b8' }}>{f.properties.detalle}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {postgisResults.geojson.features.length > 0 && (
+                  <p style={{ color: '#8b5cf6', fontSize: '0.8rem', marginTop: '0.75rem', textAlign: 'center' }}>
+                    * Los resultados han sido resaltados en el mapa con color morado.
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'space-between' }}>
+              <button 
+                type="button" 
+                className="btn btn-outline" 
+                onClick={() => { setPostgisResults(null); setPostgisModalOpen(false); }}
+              >
+                Limpiar y Cerrar
+              </button>
+              <button type="button" className="btn btn-primary" onClick={() => setPostgisModalOpen(false)}>Ver en Mapa</button>
             </div>
           </div>
         </div>

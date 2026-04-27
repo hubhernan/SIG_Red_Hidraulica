@@ -297,8 +297,8 @@ body {
 }
 
 .stat-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(37, 99, 235, 0.05);
+  border: 1px solid rgba(37, 99, 235, 0.1);
   border-radius: 0.75rem;
   padding: 0.75rem;
   display: flex;
@@ -317,7 +317,7 @@ body {
 .stat-value {
   font-size: 1.25rem;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--primary);
   margin-top: 0.25rem;
 }
 
