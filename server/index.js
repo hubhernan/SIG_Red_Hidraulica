@@ -48,8 +48,8 @@ pool.query('SELECT NOW()', (err, res) => {
   }
 });
 
-// Endpoint de prueba
-app.get('/', (req, res) => {
+// Endpoint de prueba de la API
+app.get('/api/status', (req, res) => {
   res.send('API del SIG Red Hidráulica de Pedregalito funcionando 🚀');
 });
 
