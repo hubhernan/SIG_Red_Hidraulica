@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "dev:server": "node server/index.js",
+    "dev:server": "cd server && node index.js",
     "dev:all": "npx concurrently \"npm run dev\" \"npm run dev:server\"",
     "share": "npx cloudflared tunnel --url http://localhost:5183",
+    "share:fixed": "npx cloudflared tunnel --url http://localhost:5183",
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"

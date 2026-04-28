@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ override: true });
+dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -21,12 +21,21 @@ const { Pool } = pg;
 console.log('🔌 Intentando conectar a DB:', process.env.DB_NAME || 'sig_pedregal', 'con usuario:', process.env.DB_USER || 'postgres');
 console.log('🔑 ¿Tiene contraseña?:', process.env.DB_PASSWORD ? 'Sí' : 'No');
 
-const pool = new Pool({
+const poolConfig = process.env.DATABASE_URL ? {
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+} : {
   user: process.env.DB_USER || 'postgres',
   host: process.env.DB_HOST || 'localhost',
   database: process.env.DB_NAME || 'sig_pedregal',
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT || 5432,
+};
+
+const pool = new Pool(poolConfig);
+
+pool.on('connect', client => {
+  client.query('SET search_path TO public');
 });
 
 // Verificar conexión a la base de datos
@@ -834,6 +843,7 @@ app.get('*', (req, res) => {
   const indexPath = path.join(__dirname, '../dist/index.html');
   res.sendFile(indexPath);
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
