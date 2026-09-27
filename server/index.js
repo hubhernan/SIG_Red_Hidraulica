@@ -34,8 +34,8 @@ const poolConfig = process.env.DATABASE_URL ? {
 
 const pool = new Pool(poolConfig);
 
-pool.on('connect', client => {
-  client.query('SET search_path TO public');
+pool.on('error', (err) => {
+  console.error('⚠️ Error inesperado en el pool de PostgreSQL:', err.message);
 });
 
 // Verificar conexión a la base de datos
@@ -48,7 +48,11 @@ pool.query('SELECT NOW()', (err, res) => {
   }
 });
 
-// Endpoint de prueba de la API
+// Endpoint de health check y estado
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+});
+
 app.get('/api/status', (req, res) => {
   res.send('API del SIG Red Hidráulica de Pedregalito funcionando 🚀');
 });
@@ -841,10 +845,15 @@ app.use(express.static(path.join(__dirname, '../dist')));
 // match one above, send back React's index.html file.
 app.get('*', (req, res) => {
   const indexPath = path.join(__dirname, '../dist/index.html');
-  res.sendFile(indexPath);
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      console.error('Error enviando index.html:', err);
+      res.status(500).send('Error cargando la aplicación frontend');
+    }
+  });
 });
 
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
 });
