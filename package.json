@@ -9,8 +9,8 @@
     "dev:all": "npx concurrently \"npm run dev\" \"npm run dev:server\"",
     "share": "npx cloudflared tunnel --url http://localhost:5183",
     "share:fixed": "npx cloudflared tunnel --url http://localhost:5183",
-    "build": "tsc && vite build",
-    "build:prod": "npm run build && cd server && npm install",
+    "build": "vite build",
+    "build:prod": "npm install --include=dev && vite build && cd server && npm install",
     "start": "cd server && node index.js",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
@@ -20,9 +20,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-leaflet": "^4.2.1",
-    "lucide-react": "^0.300.0"
-  },
-  "devDependencies": {
+    "lucide-react": "^0.300.0",
     "@types/leaflet": "^1.9.8",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
